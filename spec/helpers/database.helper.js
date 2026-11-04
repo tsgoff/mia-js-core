@@ -37,17 +37,9 @@ function thisModule() {
     };
 
     self.drop = function () {
-        if (!self.db) {
-            self.connect();
-        }
-        var deferred = Q.defer();
-        self.db.dropDatabase(function (error, result) {
-            if (error) {
-                return deferred.reject(error);
-            }
-            return deferred.resolve(result);
+        return Q(self.db || self.connect()).then(function (db) {
+            return db.dropDatabase();
         });
-        return deferred.promise;
     };
 
     return self;

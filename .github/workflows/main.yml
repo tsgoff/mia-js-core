@@ -1,39 +1,142 @@
-name: Run Tests
-# Controls when the action will run. Triggers the workflow on push or pull request
-# events but only for the master branch
+name: MongoDB compatibility
 on: [push, pull_request]
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+concurrency:
+  group: mongodb-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
 jobs:
-  build:
-    # The type of runner that the job will run on
-    runs-on: ubuntu-latest
+  server-matrix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     strategy:
+      fail-fast: false
       matrix:
-        node-version: [12.x]
-        mongodb-version: [4.2]
-
-    # Steps represent a sequence of tasks that will be executed as part of the job
+        node-version: [24.x]
+        # 4.4 is a migration baseline only, not a recommended/EOL-safe server.
+        mongodb-version: ['4.4', '5.0', '6.0', '7.0', '8.0']
+    env:
+      MONGODBURL_MIA_CORE_TEST: mongodb://127.0.0.1:27017/miaCoreTest
+      MIA_TEST_INIT_REPLICA_SET: '1'
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - name: Git checkout
-        uses: actions/checkout@v2
-
-      - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v1
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm run test:mongo-unit
+      - name: Start isolated MongoDB
+        run: docker run --detach --name mia-mongo --publish 127.0.0.1:27017:27017 mongo:${{ matrix.mongodb-version }} --replSet mia-test --bind_ip_all
+      - run: npm run test:mongo-integration
+      - name: Package completeness
+        run: npm pack --dry-run
+      - name: MongoDB logs
+        if: failure()
+        run: docker logs mia-mongo
+      - name: Stop test MongoDB
+        if: always()
+        run: docker rm --force mia-mongo
 
-      - name: Start MongoDB
-        uses: supercharge/mongodb-github-action@1.3.0
+  runtime-matrix:
+    name: Node 24 / ${{ matrix.runtime }} / ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        runtime: [bookworm-slim, alpine]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start MongoDB 8.0
+        run: docker run --detach --name mia-mongo --publish 127.0.0.1:27017:27017 mongo:8.0 --replSet mia-test --bind_ip_all
+      - name: Install and test in the deployment runtime
+        env:
+          RUNTIME: ${{ matrix.runtime }}
+        run: |
+          docker run --rm --network host --volume "$PWD:/source:ro" \
+            --env MONGODBURL_MIA_CORE_TEST=mongodb://127.0.0.1:27017/miaCoreTest \
+            --env MIA_TEST_INIT_REPLICA_SET=1 "node:24-$RUNTIME" sh -ec '
+              mkdir /work
+              cp -R /source/. /work/
+              cd /work
+              node -p "process.version + \" / \" + process.arch"
+              npm ci
+              npm run test:mongo-unit
+              npm run test:mongo-integration
+              node -e "const mia = require(\".\"); if (!mia.Run || !mia.BaseModel) process.exit(1)"
+            '
+      - name: MongoDB logs
+        if: failure()
+        run: docker logs mia-mongo
+      - name: Stop test MongoDB
+        if: always()
+        run: docker rm --force mia-mongo
+
+  security:
+    name: Authentication and verified TLS
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      MIA_TEST_DOCKER: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          mongodb-version: ${{ matrix.mongodb-version }}
-          mongodb-replica-set: insert-replica-set-name
-      - name: Npm Install
+          node-version: 24.x
+          cache: npm
+      - run: npm ci
+      - name: Create disposable certificates
         run: |
-          npm i
-      - name: Unit Tests
+          mkdir .ci-mongo-tls
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -keyout .ci-mongo-tls/ca.key -out .ci-mongo-tls/ca.crt -subj /CN=Mia-CI-CA
+          openssl req -newkey rsa:2048 -nodes -keyout .ci-mongo-tls/server.key -out .ci-mongo-tls/server.csr -subj /CN=localhost
+          printf 'subjectAltName=IP:127.0.0.1,DNS:localhost\nextendedKeyUsage=serverAuth\n' > .ci-mongo-tls/server.ext
+          openssl x509 -req -days 1 -in .ci-mongo-tls/server.csr -CA .ci-mongo-tls/ca.crt -CAkey .ci-mongo-tls/ca.key -CAcreateserial -extfile .ci-mongo-tls/server.ext -out .ci-mongo-tls/server.crt
+          cat .ci-mongo-tls/server.key .ci-mongo-tls/server.crt > .ci-mongo-tls/server.pem
+          chmod 644 .ci-mongo-tls/server.pem
+      - name: Bootstrap disposable user without exposing a remote port
         run: |
-          npm run test
-      - name: Test Complete
+          docker run --detach --name mia-security --publish 127.0.0.1:27032:27017 --mount source=mia-security-data,target=/data/db mongo:8.0 --bind_ip_all
+          node scripts/prepare-mongodb-security-test.js
+          docker stop mia-security
+          docker rm mia-security
+      - name: Require authentication and TLS
         run: |
-          echo Test completed.
+          docker run --detach --name mia-security --publish 127.0.0.1:27032:27017 \
+            --mount source=mia-security-data,target=/data/db --volume "$PWD/.ci-mongo-tls:/certs:ro" \
+            mongo:8.0 --auth --bind_ip_all --tlsMode requireTLS --tlsCertificateKeyFile /certs/server.pem --tlsCAFile /certs/ca.crt --tlsAllowConnectionsWithoutCertificates
+          npm run test:mongo-security
+      - name: MongoDB logs
+        if: failure()
+        run: docker logs mia-security
+      - name: Clean up test server
+        if: always()
+        run: |
+          docker rm --force mia-security
+          docker volume rm mia-security-data
+
+  resilience:
+    name: Replica-set failover, outage and atomic lock contention
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      MIA_TEST_DOCKER: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+          cache: npm
+      - run: npm ci
+      - run: docker pull mongo:8.0
+      - run: npm run test:mongo-resilience
+      - name: Clean up replica set even after timeout
+        if: always()
+        run: |
+          for name in mia-resilience-27033 mia-resilience-27034 mia-resilience-27035; do
+            if docker container inspect "$name" > /dev/null 2>&1; then
+              docker rm --force --volumes "$name"
+            fi
+          done

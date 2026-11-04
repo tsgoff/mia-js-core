@@ -1,6 +1,8 @@
 # mia-js-core
 mia.js - Middleware API framework - Core module
 
+Fork migration notes: [MongoDB driver / Node 24](docs/mongodb-driver-migration.md).
+
 <a href="#"><img src="http://mia-js.github.io/mia-js/images/miajs.png" title="mia.js"/></a>
 
 mia.js is an API framework based on [node.js](http://nodejs.org), [Express](https://github.com/strongloop/express) and [mongoDB](https://www.mongodb.org/) that makes it easy to build custom or enterprise-grade apis and web frontends.

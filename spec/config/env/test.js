@@ -33,7 +33,7 @@ module.exports = {
     defaultMongoDatabase: 'miaCoreTest',
     mongoDatabases: {
         miaCoreTest: {
-            url: 'mongodb://localhost:27017/miaCoreTest',
+            url: process.env.MONGODBURL_MIA_CORE_TEST || 'mongodb://127.0.0.1:27017/miaCoreTest',
             options: {
                 writeConcern: {w: 1}, // write acknowledgement only from the standalone/primary
                 poolSize: 15,
