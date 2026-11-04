@@ -95,6 +95,17 @@ set: atomic lock contention, primary step-down, bounded outage errors and writes
 after restarting all members. These jobs require Docker; test mutation targets
 are fixed loopback ports with explicitly opted-in disposable containers.
 
+CI uses Ubuntu 22 runners (kernel 6.8), because the first run found MongoDB 8
+refuses startup on the Ubuntu 24 runner's kernel 7.0 / >=6.19
+([SERVER-121912](https://jira.mongodb.org/browse/SERVER-121912)). No startup
+guard is bypassed. ARM64 Node containers run via QEMU on x86_64 against the
+MongoDB 8 server; this validates ARM64 userspace, **not native ARM64 server/CPU
+behavior**. A native ARM64 deployment smoke test remains required.
+
+The first Actions run passed MongoDB 4.4, 5.0, 6.0 and 7.0. MongoDB-8-based
+jobs failed before testing because of that kernel incompatibility; the corrected
+workflow must pass before claiming the complete CI matrix is verified.
+
 The private Middleware repository is **not** cloned into this public fork's
 workflow. Its 375-spec application suite remains a separate consumer check;
 no private fixtures, credentials or repository tokens are published here.

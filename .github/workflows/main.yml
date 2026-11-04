@@ -7,7 +7,9 @@ permissions:
   contents: read
 jobs:
   server-matrix:
-    runs-on: ubuntu-24.04
+    # MongoDB 8 currently refuses kernel >=6.19 (SERVER-121912).
+    # Ubuntu 22 runners use 6.8; container userspace remains independently tested.
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -39,23 +41,29 @@ jobs:
         run: docker rm --force mia-mongo
 
   runtime-matrix:
-    name: Node 24 / ${{ matrix.runtime }} / ${{ matrix.runner }}
-    runs-on: ${{ matrix.runner }}
+    name: Node 24 / ${{ matrix.runtime }} / ${{ matrix.arch }}
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        arch: [amd64, arm64]
         runtime: [bookworm-slim, alpine]
     steps:
       - uses: actions/checkout@v4
+      - name: Enable ARM64 userspace emulation
+        if: matrix.arch == 'arm64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
       - name: Start MongoDB 8.0
         run: docker run --detach --name mia-mongo --publish 127.0.0.1:27017:27017 mongo:8.0 --replSet mia-test --bind_ip_all
       - name: Install and test in the deployment runtime
         env:
           RUNTIME: ${{ matrix.runtime }}
+          ARCH: ${{ matrix.arch }}
         run: |
-          docker run --rm --network host --volume "$PWD:/source:ro" \
+          docker run --rm --platform "linux/$ARCH" --network host --volume "$PWD:/source:ro" \
             --env MONGODBURL_MIA_CORE_TEST=mongodb://127.0.0.1:27017/miaCoreTest \
             --env MIA_TEST_INIT_REPLICA_SET=1 "node:24-$RUNTIME" sh -ec '
               mkdir /work
@@ -76,7 +84,7 @@ jobs:
 
   security:
     name: Authentication and verified TLS
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
       MIA_TEST_DOCKER: '1'
@@ -119,7 +127,7 @@ jobs:
 
   resilience:
     name: Replica-set failover, outage and atomic lock contention
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
       MIA_TEST_DOCKER: '1'
